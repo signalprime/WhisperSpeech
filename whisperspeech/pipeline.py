@@ -4,14 +4,16 @@
 __all__ = ['Pipeline']
 
 # %% ../nbs/7. Pipeline.ipynb 1
-from os.path import expanduser
 import torch
+from torch import Tensor
 from whisperspeech.t2s_up_wds_mlang_enclm import TSARTransformer
 from whisperspeech.s2a_delar_mup_wds_mlang import SADelARTransformer
 from whisperspeech.a2wav import Vocoder
 from whisperspeech import inference
 import traceback
 from pathlib import Path
+from os.path import expanduser
+from typing import Optional, Callable, Union
 
 # %% ../nbs/7. Pipeline.ipynb 2
 class Pipeline:
@@ -42,7 +44,24 @@ class Pipeline:
          0.2702,  0.1699, -0.1443, -0.9614,  0.3261,  0.1718,  0.3545, -0.0686]
     )
     
-    def __init__(self, t2s_ref=None, s2a_ref=None, optimize=True, torch_compile=False, device=None):
+    def __init__(self, t2s_ref: Optional[str] = None, s2a_ref: Optional[str] = None, optimize: bool = True, torch_compile: bool = False, device: Optional[str] = None) -> None:
+        """
+        Initializes the Pipeline class with models for text-to-speech and speech-to-audio processing.
+
+        This constructor loads and optionally optimizes the models for text-to-speech (T2S) and
+        speech-to-audio (S2A) transformations. It sets up the device for computation and handles
+        model optimization if requested.
+
+        Args:
+            t2s_ref (Optional[str]): A reference to the text-to-speech model. Default is None.
+            s2a_ref (Optional[str]): A reference to the speech-to-audio model. Default is None.
+            optimize (bool): A flag indicating whether to optimize the loaded models. Default is True.
+            torch_compile (bool): A flag indicating whether to use TorchScript for model optimization. Default is False.
+            device (Optional[str]): The device to run the models on. If None, automatically selects the device.
+
+        Raises:
+            Exception: If there is an issue loading the models, an exception will be printed to stdout.
+        """
         if device is None: device = inference.get_compute_device()
         self.device = device
         args = dict()
@@ -66,8 +85,18 @@ class Pipeline:
         self.vocoder = Vocoder(device=device)
         self.encoder = None
 
-    def extract_spk_emb(self, fname):
-        """Extracts a speaker embedding from the first 30 seconds of the give audio file.
+    def extract_spk_emb(self, fname: str) -> Tensor:
+        """
+        Extracts speaker embeddings from an audio file.
+
+        This method extracts embeddings for the speaker from the first 30 seconds of the given audio file.
+        It normalizes the audio samples and computes the embeddings using a pretrained encoder.
+
+        Args:
+            fname (str): The filename or path of the audio file from which to extract speaker embeddings.
+
+        Returns:
+            Tensor: A tensor representing the extracted speaker embeddings.
         """
         import torchaudio
         if self.encoder is None:
@@ -86,8 +115,42 @@ class Pipeline:
         spk_emb = self.encoder.encode_batch(samples.unsqueeze(0))
         
         return spk_emb[0,0].to(self.device)
-        
-    def generate_atoks(self, text, speaker=None, lang='en', cps=15, step_callback=None):
+
+    def set_default_speaker(self, speaker: str) -> None:
+        """
+        Sets the default speaker for the pipeline.
+
+        This method allows users to specify a default speaker whose embeddings will be used for
+        audio generation tasks. It is particularly useful for scenarios where the same speaker's
+        voice is used repeatedly, optimizing the process by extracting speaker embeddings only once.
+
+        Args:
+            speaker (str): The filename or URI for the speaker whose embeddings are to be extracted 
+                          and set as the default.
+
+        Returns:
+            None
+        """      
+        self.default_speaker = self.extract_spk_emb(speaker)
+
+    def generate_atoks(self, text: str, speaker: Optional[Union[str, Path]] = None, lang: str = 'en', cps: int = 15, step_callback: Optional[Callable] = None) -> Tensor:
+        """
+        Generates audio tokens from text using specified speaker embeddings.
+
+        This function converts input text into speech tokens and then to audio tokens, considering
+        the specified speaker's voice. If no speaker is specified, it uses the default speaker set
+        for the pipeline.
+
+        Args:
+            text (str): The input text to convert to audio tokens.
+            speaker (Optional[Union[str, Path]]): The speaker identifier or path. If None, uses the default speaker.
+            lang (str): The language of the input text. Default is 'en'.
+            cps (int): Characters per second, controlling the speech speed. Default is 15.
+            step_callback (Optional[Callable]): An optional callback function for progress tracking.
+
+        Returns:
+            Tensor: A tensor of audio tokens representing the generated speech.
+        """        
         if speaker is None: speaker = self.default_speaker
         elif isinstance(speaker, (str, Path)): speaker = self.extract_spk_emb(speaker)
         text = text.replace("\n", " ")
@@ -97,16 +160,82 @@ class Pipeline:
         atoks = self.s2a.generate(stoks, speaker.unsqueeze(0), step=step_callback)
         return atoks
         
-    def generate(self, text, speaker=None, lang='en', cps=15, step_callback=None):
+    def generate(self, text: str, speaker: Optional[Union[str, Path]] = None, lang: str = 'en', cps: int = 15, step_callback: Optional[Callable] = None) -> Tensor:
+        """
+        Generates audio from text using the specified or default speaker.
+
+        This method is a higher-level wrapper that directly converts input text into audio, leveraging
+        the generate_atoks function internally. It supports customization of speech characteristics
+        and optional progress tracking through a callback.
+
+        Args:
+            text (str): The text to convert to speech.
+            speaker (Optional[Union[str, Path]]): The identifier or path of the speaker. Uses default if None.
+            lang (str): The language of the input text. Default is 'en'.
+            cps (int): Speed of speech in characters per second. Default is 15.
+            step_callback (Optional[Callable]): A callback for tracking progress.
+
+        Returns:
+            Audio: An audio object containing the generated speech.
+        """
         return self.vocoder.decode(self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=step_callback))
     
-    def generate_to_file(self, fname, text, speaker=None, lang='en', cps=15, step_callback=None):
+    def generate_to_file(self, fname: str, text: str, speaker: Optional[Union[str, Path]] = None, lang: str = 'en', cps: int = 15, step_callback: Optional[Callable] = None) -> None:
+        """
+        Generates speech from text and saves it to a file.
+
+        This method extends the generate function by saving the generated audio to the specified file.
+        It offers the same flexibility in terms of speech customization and progress tracking.
+
+        Args:
+            fname (str): The filename or path where the audio should be saved.
+            text (str): The text to convert to speech.
+            speaker (Optional[Union[str, Path]]): The speaker identifier or path. Default speaker is used if None.
+            lang (str): The language of the input text. Default is 'en'.
+            cps (int): Speech speed in characters per second. Default is 15.
+            step_callback (Optional[Callable]): An optional callback function for progress updates.
+
+        Returns:
+            None
+        """
         self.vocoder.decode_to_file(fname, self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None))
         
-    def generate_to_notebook(self, text, speaker=None, lang='en', cps=15, step_callback=None):
+    def generate_to_notebook(self, text: str, speaker: Optional[Union[str, Path]] = None, lang: str = 'en', cps: int = 15, step_callback: Optional[Callable] = None) -> None:
+        """
+        Generates and displays an audio player in Jupyter notebooks to play the generated speech.
+
+        This function is designed for use within Jupyter notebooks, where it directly plays the generated
+        audio. It provides a convenient method for previewing speech synthesis results in interactive environments.
+
+        Args:
+            text (str): The text to synthesize.
+            speaker (Optional[Union[str, Path]]): The speaker's identifier or path. Defaults to the pipeline's set speaker.
+            lang (str): The language of the input text. Default is 'en'.
+            cps (int): The speed of speech in characters per second. Default is 15.
+            step_callback (Optional[Callable]): An optional callback for tracking progress.
+
+        Returns:
+            None
+        """
         self.vocoder.decode_to_notebook(self.generate_atoks(text, speaker, lang=lang, cps=cps, step_callback=None))
 
-    def generate_to_playback(self, text, speaker=None, lang='en', cps=15, step_callback=None):
+    def generate_to_playback(self, text: str, speaker: Optional[Union[str, Path]] = None, lang: str = 'en', cps: int = 15, step_callback: Optional[Callable] = None) -> None:
+        """
+        Directly plays back the generated speech audio.
+
+        This function generates speech from text and plays it back immediately using the sounddevice library.
+        It's especially useful for real-time speech synthesis and testing. Note: sounddevice must be installed.
+
+        Args:
+            text (str): The text to synthesize into speech.
+            speaker (Optional[Union[str, Path]]): The speaker identifier or file. If None, uses the default speaker.
+            lang (str): The language of the input text. Default is 'en'.
+            cps (int): The speech speed in characters per second. Default is 15.
+            step_callback (Optional[Callable]): An optional callback for progress updates.
+
+        Returns:
+            None
+        """
         try:
             import sounddevice as sd
         except ImportError:
